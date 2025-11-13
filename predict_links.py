@@ -5,11 +5,32 @@ import torch.nn.functional as F
 import torch
 import time
 import os
+import logging
+import sys
+from datetime import datetime
 
 """ 
 Relational Graph Convolution Network for link prediction. 
 Reproduced as described in https://arxiv.org/abs/1703.06103 (Section 4).
 """
+
+class Tee:
+    """Class to redirect output to both file and console"""
+    def __init__(self, *files):
+        self.files = files
+    def write(self, obj):
+        for f in self.files:
+            f.write(obj)
+            try:
+                f.flush()
+            except:
+                pass
+    def flush(self):
+        for f in self.files:
+            try:
+                f.flush()
+            except:
+                pass
 
 
 
@@ -167,6 +188,10 @@ def train(dataset,
         optimiser.step()
         t3 = time.time()
 
+        # Print progress every epoch (but detailed evaluation only every eval_every epochs)
+        if epoch % 10 == 0 or epoch == 1:
+            print(f'[Epoch {epoch}] Loss: {loss.item():.5f} Forward: {(t2 - t1):.3f}s Backward: {(t3 - t2):.3f}s', flush=True)
+
         # Evaluate on validation set
         if epoch % eval_every == 0 and not epoch == max_epochs:
             with torch.no_grad():
@@ -230,13 +255,34 @@ def train(dataset,
               f'Hits@10({filtered_}): {hits_at_10}')
 
 if __name__ == '__main__':
+    # Setup logging to both file and console
+    log_filename = f"nl27k_training_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+    
+    # Redirect stdout and stderr to both console and file
+    log_file = open(log_filename, 'a')
+    original_stdout = sys.stdout
+    original_stderr = sys.stderr
+    sys.stdout = Tee(original_stdout, log_file)
+    sys.stderr = Tee(original_stderr, log_file)
+    
+    # Setup logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler(log_filename),
+            logging.StreamHandler(original_stdout)
+        ]
+    )
+    logger = logging.getLogger(__name__)
+    
     # Define a minimal configuration dictionary for local testing
     local_config = {
         "dataset": {"name": "cn15k"},
         "training": {
-            "epochs": 6000,
-            "use_cuda": True,
-            "graph_batch_size": 30000,
+            "epochs": 1000,
+            "use_cuda": False,
+            "graph_batch_size": 20000,
             "sampling_method": "uniform",
             "negative_sampling": {"sampling_rate": 1, "head_prob": 0.5},
             "optimiser": {"algorithm": "adam", "learn_rate": 0.01, "weight_decay": 0.0}
@@ -248,7 +294,7 @@ if __name__ == '__main__':
             "hidden2_size": 200,
             "num_layers": 2,
             "decomposition": {"type": "basis", "num_bases": 30},
-            "edge_dropout": {"general": 0.4, "self_loop": 0.2},
+            "edge_dropout": {"general": 0.4},
             "weight_init": "glorot-normal",
             "include_gain": True,
             "bias_init": "zeros"
@@ -263,11 +309,12 @@ if __name__ == '__main__':
             "final_run": False, 
             "filtered": True, 
             "check_every": 200, 
-            "batch_size": 8, 
+            "batch_size": 32, 
             "verbose": False
         }
     }
     
+    logger.info(f"Logging to file: {log_filename}")
     print("--- Starting Local R-GCN Link Prediction Test ---")
     train(
         dataset=local_config["dataset"],
