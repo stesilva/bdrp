@@ -42,22 +42,26 @@ def filter_scores(scores, batch, true_triples, head=True):
 def evaluate(model, graph, test_set, true_triples, num_nodes, batch_size=16, hits_at_k=[1, 3, 10], filter_candidates=True, verbose=True):
     """ Evaluates a triple scoring model. Does the sorting in a single, GPU-accelerated operation. """
 
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-
-    rng = tqdm.trange if verbose else range
+    device = next(model.parameters()).device
 
     ranks = []
     for head in [True, False]:  # head or tail prediction
 
-        for fr in rng(0, len(test_set), batch_size):
+        for fr in range(0, len(test_set), batch_size):
             to = min(fr + batch_size, len(test_set))
+            
+            # Print progress every 500 triples
+            if verbose and (fr % 500 == 0 or to == len(test_set)):
+                print(f"  Evaluated {to}/{len(test_set)} triples...")
 
-            batch = test_set[fr:to, :].to(device=device)
+            batch = test_set[fr:to, :].to(device)
             bn, _ = batch.size()
 
             # compute the full score matrix (filter later)
             bases   = batch[:, 1:] if head else batch[:, :2]
             targets = batch[:, 0]  if head else batch[:, 2]
+            # Ensure targets is on the correct device
+            targets = targets.to(device)
 
             # collect the triples for which to compute scores
             bexp = bases.view(bn, 1, 2).expand(bn, num_nodes, 2)
@@ -65,7 +69,9 @@ def evaluate(model, graph, test_set, true_triples, num_nodes, batch_size=16, hit
             toscore = torch.cat([ar, bexp] if head else [bexp, ar], dim=2)
             assert toscore.size() == (bn, num_nodes, 3)
 
-            scores, _ = model(graph, toscore)
+            # Move graph to device
+            graph_device = graph.to(device)
+            scores, _ = model(graph_device, toscore)
             assert scores.size() == (bn, num_nodes)
 
             # filter out the true triples that aren't the target

@@ -79,15 +79,28 @@ class DistMult(Module):
         """ Compute Schlichtkrull L2 penalty for the decoder """
 
         s_index, p_index, o_index = split_spo(triples)
+        
+        # Ensure indices are on the same device as nodes
+        device = nodes.device
+        s_index = s_index.to(device)
+        p_index = p_index.to(device)
+        o_index = o_index.to(device)
 
         s, p, o = nodes[s_index, :], self.relations[p_index, :], nodes[o_index, :]
 
         return s.pow(2).mean() + p.pow(2).mean() + o.pow(2).mean()
-
+    
+    
     def forward(self, triples, nodes):
         """ Score candidate triples """
 
         s_index, p_index, o_index = split_spo(triples)
+        
+        # Ensure indices are on the same device as nodes
+        device = nodes.device
+        s_index = s_index.to(device)
+        p_index = p_index.to(device)
+        o_index = o_index.to(device)
 
         s, p, o = nodes[s_index, :], self.relations[p_index, :], nodes[o_index, :]
 

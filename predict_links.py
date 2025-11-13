@@ -173,7 +173,7 @@ def train(dataset,
                 print("Starting evaluation...")
                 model.eval()
 
-                graph = torch.tensor(train, dtype=torch.long)
+                graph = torch.tensor(train, dtype=torch.long, device=device)
 
                 mrr, hits, ranks = evaluate(
                     model=model,
@@ -206,7 +206,7 @@ def train(dataset,
         print("Starting final evaluation...")
         model.eval()
 
-        graph = torch.tensor(train, dtype=torch.long)
+        graph = torch.tensor(train, dtype=torch.long, device=device)
 
         mrr, hits, ranks = evaluate(
             model=model,
@@ -234,9 +234,9 @@ if __name__ == '__main__':
     local_config = {
         "dataset": {"name": "cn15k"},
         "training": {
-            "epochs": 1000,
-            "use_cuda": False,
-            "graph_batch_size": 20000,
+            "epochs": 6000,
+            "use_cuda": True,
+            "graph_batch_size": 30000,
             "sampling_method": "uniform",
             "negative_sampling": {"sampling_rate": 1, "head_prob": 0.5},
             "optimiser": {"algorithm": "adam", "learn_rate": 0.01, "weight_decay": 0.0}
@@ -248,7 +248,7 @@ if __name__ == '__main__':
             "hidden2_size": 200,
             "num_layers": 2,
             "decomposition": {"type": "basis", "num_bases": 30},
-            "edge_dropout": {"general": 0.4},
+            "edge_dropout": {"general": 0.4, "self_loop": 0.2},
             "weight_init": "glorot-normal",
             "include_gain": True,
             "bias_init": "zeros"
@@ -263,7 +263,7 @@ if __name__ == '__main__':
             "final_run": False, 
             "filtered": True, 
             "check_every": 200, 
-            "batch_size": 32, 
+            "batch_size": 8, 
             "verbose": False
         }
     }
