@@ -36,10 +36,13 @@ def load_link_prediction_data(name, use_test_set=False, limit=None):
     """
 
     if name.lower() == 'cn15k':
-        train_file = locate_file('cn15k/train.tsv')
+        train_file = locate_file('nl/train.tsv')
         val_file = locate_file('cn15k/val.tsv')
         test_file = locate_file('cn15k/test.tsv')
-    
+    elif name.lower() == 'nl27k':
+        train_file = locate_file('nl27k/train.tsv')
+        val_file = locate_file('nl27k/val.tsv')
+        test_file = locate_file('nl27k/test.tsv')
     else:
         raise ValueError(f'Could not find \'{name}\' dataset')
 
