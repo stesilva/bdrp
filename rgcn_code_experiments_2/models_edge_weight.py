@@ -78,7 +78,13 @@ class RGCNConv(MessagePassing):
         else:
             self.register_parameter('bias', None)
 
-        if self.edge_weight_mode == "learnable":
+        if self.edge_weight_mode == "concat":
+            # MLP that takes concatenated features (x_j + edge_weight) and outputs transformed features
+            self.edge_weight_mlp = nn.Sequential(
+                nn.Linear(in_channels + 1, out_channels),
+                nn.ReLU()
+            )
+        elif self.edge_weight_mode == "learnable":
             # Simple 2-layer MLP transforming scalar edge weight to scalar
             self.edge_weight_mlp = nn.Sequential(
                 nn.Linear(1, 8),
@@ -86,6 +92,8 @@ class RGCNConv(MessagePassing):
                 nn.Linear(8, 1),
                 nn.Sigmoid()  # Keep weights in (0,1)
             )
+        else:
+            self.edge_weight_mlp = None
 
         self.reset_parameters()
 
@@ -96,15 +104,15 @@ class RGCNConv(MessagePassing):
         uniform(size, self.root)
         uniform(size, self.bias)
 
-        if self.edge_weight_mode == "concat":
-            nn.init.xavier_uniform_(self.edge_weight_mlp[0].weight)
-            nn.init.zeros_(self.edge_weight_mlp[0].bias)
-            
-        if self.edge_weight_mode == "learnable":
-            nn.init.xavier_uniform_(self.edge_weight_mlp[0].weight)
-            nn.init.zeros_(self.edge_weight_mlp[0].bias)
-            nn.init.xavier_uniform_(self.edge_weight_mlp[2].weight)
-            nn.init.zeros_(self.edge_weight_mlp[2].bias)
+        if self.edge_weight_mlp is not None:
+            if self.edge_weight_mode == "concat":
+                nn.init.xavier_uniform_(self.edge_weight_mlp[0].weight)
+                nn.init.zeros_(self.edge_weight_mlp[0].bias)
+            elif self.edge_weight_mode == "learnable":
+                nn.init.xavier_uniform_(self.edge_weight_mlp[0].weight)
+                nn.init.zeros_(self.edge_weight_mlp[0].bias)
+                nn.init.xavier_uniform_(self.edge_weight_mlp[2].weight)
+                nn.init.zeros_(self.edge_weight_mlp[2].bias)
 
     def forward(self, x, edge_index, edge_type, edge_norm=None, edge_weight=None, size=None):
         if edge_weight is None and edge_norm is not None:
@@ -112,56 +120,55 @@ class RGCNConv(MessagePassing):
             
         return self.propagate(edge_index, size=size, x=x, edge_type=edge_type, edge_weight=edge_weight)
 
-def message(self, x_j, edge_index_j, edge_type, edge_weight):
-    w = torch.matmul(self.att, self.basis.view(self.num_bases, -1))
+    def message(self, x_j, edge_index_j, edge_type, edge_weight):
+        w = torch.matmul(self.att, self.basis.view(self.num_bases, -1))
 
-    if x_j is None:
-        print("x_j is none")
-        w = w.view(-1, self.out_channels)
-        index = edge_type * self.in_channels + edge_index_j
-        out = torch.index_select(w, 0, index)
-    else:
-        if self.edge_weight_mode == "concat":
-            assert edge_weight is not None, "edge_weight must be provided for 'concat' mode"
-            edge_weight = edge_weight.view(-1, 1)
-            x_j_w_concat = torch.cat([x_j, edge_weight], dim=-1)
-            out = self.edge_weight_mlp(x_j_w_concat)
-
-        elif self.edge_weight_mode == "learnable":
-            assert edge_weight is not None, "edge_weight must be provided for 'learnable' mode"
-            # Pass raw edge weight through MLP to get transformed scalar weight
-            edge_weight = edge_weight.view(-1, 1)
-            transformed_weight = self.edge_weight_mlp(edge_weight)  # Output shape [num_edges, 1]
-
-            w = w.view(self.num_relations, self.in_channels, self.out_channels)
-            w = torch.index_select(w, 0, edge_type)
-            out = torch.bmm(x_j.unsqueeze(1), w).squeeze(-2)
-
-            # Scale messages by transformed weights
-            out = out * transformed_weight.view(-1, 1)
-
+        if x_j is None:
+            print("x_j is none")
+            w = w.view(-1, self.out_channels)
+            index = edge_type * self.in_channels + edge_index_j
+            out = torch.index_select(w, 0, index)
         else:
-            w = w.view(self.num_relations, self.in_channels, self.out_channels)
-            w = torch.index_select(w, 0, edge_type)
-            out = torch.bmm(x_j.unsqueeze(1), w).squeeze(-2)
+            if self.edge_weight_mode == "concat":
+                assert edge_weight is not None, "edge_weight must be provided for 'concat' mode"
+                edge_weight = edge_weight.view(-1, 1)
+                x_j_w_concat = torch.cat([x_j, edge_weight], dim=-1)
+                out = self.edge_weight_mlp(x_j_w_concat)
 
-            if edge_weight is not None:
-                if self.edge_weight_mode == "normalize":
-                    dst_nodes = edge_index_j
-                    key = dst_nodes * self.num_relations + edge_type
-                    num_nodes = x_j.size(0)
-                    norm_denom = scatter(edge_weight, key, dim=0,
-                                         dim_size=num_nodes * self.num_relations,
-                                         reduce='sum')
-                    normed_weights = edge_weight / (norm_denom[key] + 1e-8)
-                    out = out * normed_weights.view(-1, 1)
-                elif self.edge_weight_mode == "none":
-                    out = out * edge_weight.view(-1, 1)
-                else:
-                    raise ValueError(f"Invalid edge_weight_mode: {self.edge_weight_mode}")
+            elif self.edge_weight_mode == "learnable":
+                assert edge_weight is not None, "edge_weight must be provided for 'learnable' mode"
+                # Pass raw edge weight through MLP to get transformed scalar weight
+                edge_weight = edge_weight.view(-1, 1)
+                transformed_weight = self.edge_weight_mlp(edge_weight)  # Output shape [num_edges, 1]
 
-    return out
+                w = w.view(self.num_relations, self.in_channels, self.out_channels)
+                w = torch.index_select(w, 0, edge_type)
+                out = torch.bmm(x_j.unsqueeze(1), w).squeeze(-2)
 
+                # Scale messages by transformed weights
+                out = out * transformed_weight.view(-1, 1)
+
+            else:
+                w = w.view(self.num_relations, self.in_channels, self.out_channels)
+                w = torch.index_select(w, 0, edge_type)
+                out = torch.bmm(x_j.unsqueeze(1), w).squeeze(-2)
+
+                if edge_weight is not None:
+                    if self.edge_weight_mode == "normalize":
+                        dst_nodes = edge_index_j
+                        key = dst_nodes * self.num_relations + edge_type
+                        num_nodes = x_j.size(0)
+                        norm_denom = scatter(edge_weight, key, dim=0,
+                                            dim_size=num_nodes * self.num_relations,
+                                            reduce='sum')
+                        normed_weights = edge_weight / (norm_denom[key] + 1e-8)
+                        out = out * normed_weights.view(-1, 1)
+                    elif self.edge_weight_mode == "none":
+                        out = out * edge_weight.view(-1, 1)
+                    else:
+                        raise ValueError(f"Invalid edge_weight_mode: {self.edge_weight_mode}")
+
+        return out
 
     def update(self, aggr_out, x):
         if self.root is not None:

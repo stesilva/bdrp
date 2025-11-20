@@ -1,6 +1,6 @@
 #!/bin/bash
 
-#SBATCH --job-name=rgcn_ppi5k_modes
+#SBATCH --job-name=rgcn_cn15k_modes
 #SBATCH --output=%x_%j.out
 #SBATCH --error=%x_%j.err
 #SBATCH --time=06:00:00
@@ -40,13 +40,40 @@ module purge
 module load anaconda3/2020.02/gcc-9.2.0
 
 # Load CUDA if using GPU
+# Note: PyTorch 2.6.0+cu124 comes with bundled CUDA libraries, but we still need
+# compatible CUDA driver and may need system CUDA for compilation tools
 if [[ "$SLURM_JOB_PARTITION" == *"gpu"* ]]; then
     echo "Loading CUDA module..."
-    # Check available CUDA versions: module avail cuda
-    module load cuda/11.3.1/gcc-9.2.0 2>/dev/null || \
-    module load cuda/11.1.1/gcc-9.2.0 2>/dev/null || \
-    module load cuda/10.2.89/intel-19.0.3.199 2>/dev/null || \
-    echo "Warning: No CUDA module loaded. Using system CUDA if available."
+    echo "Note: PyTorch 2.6.0+cu124 requires CUDA 12.4 compatible driver"
+    echo "      If CUDA is not detected, try: module avail cuda"
+    
+    # Try CUDA 12.x first (for PyTorch 2.6.0+cu124), then fall back to 11.x
+    # Skip 10.x as it's incompatible with PyTorch 2.6.0+cu124
+    CUDA_LOADED=false
+    for cuda_version in "12.4" "12.3" "12.2" "12.1" "12.0" "11.8" "11.7" "11.6" "11.5" "11.4" "11.3.1" "11.1.1"; do
+        # Try different compiler variants
+        if module load cuda/${cuda_version}/gcc-9.2.0 2>/dev/null; then
+            echo "Successfully loaded CUDA ${cuda_version} with gcc-9.2.0"
+            CUDA_LOADED=true
+            break
+        elif module load cuda/${cuda_version}/intel-19.0.3.199 2>/dev/null; then
+            echo "Successfully loaded CUDA ${cuda_version} with intel-19.0.3.199"
+            CUDA_LOADED=true
+            break
+        fi
+    done
+    
+    if [ "$CUDA_LOADED" = false ]; then
+        echo "Warning: Could not load CUDA 11.x or 12.x module."
+        echo "PyTorch 2.6.0+cu124 may still work with bundled CUDA libraries if driver is compatible."
+        echo "Available CUDA modules (check with: module avail cuda):"
+        module avail cuda 2>&1 | head -20 || true
+        echo ""
+        echo "If CUDA is still not detected, you may need to:"
+        echo "  1. Check GPU driver version: nvidia-smi"
+        echo "  2. Install PyTorch version matching available CUDA"
+        echo "  3. Or use CPU mode: --gpu -1"
+    fi
 fi
 
 echo "Loaded modules:"
@@ -107,13 +134,38 @@ python -c "import torch_geometric" 2>/dev/null || {
 
 echo ""
 
+# Check CUDA driver and libraries
+echo "Checking CUDA driver and libraries..."
+if command -v nvidia-smi &> /dev/null; then
+    echo "NVIDIA driver info:"
+    nvidia-smi --query-gpu=name,driver_version,compute_cap --format=csv,noheader 2>/dev/null || echo "  nvidia-smi failed"
+else
+    echo "  nvidia-smi not found in PATH"
+fi
+if [ -n "${CUDA_HOME:-}" ]; then
+    echo "CUDA_HOME: $CUDA_HOME"
+fi
+if [ -n "${LD_LIBRARY_PATH:-}" ]; then
+    echo "LD_LIBRARY_PATH contains CUDA: $(echo $LD_LIBRARY_PATH | grep -o 'cuda[^:]*' | head -1 || echo 'none')"
+fi
+echo ""
+
 # Check PyTorch installation
 echo "Checking PyTorch..."
 python -c "
 import torch
+import os
 print(f'PyTorch version:  {torch.__version__}')
+print(f'PyTorch CUDA compiled version: {torch.version.cuda if hasattr(torch.version, \"cuda\") else \"N/A\"}')
 print(f'CUDA available:   {torch.cuda.is_available()}')
-if torch.cuda.is_available():
+if not torch.cuda.is_available():
+    print('CUDA not available. Possible reasons:')
+    print('  1. CUDA driver version too old')
+    print('  2. CUDA library version mismatch')
+    print('  3. GPU not accessible')
+    print(f'  CUDA_HOME: {os.environ.get(\"CUDA_HOME\", \"not set\")}')
+    print(f'  LD_LIBRARY_PATH: {os.environ.get(\"LD_LIBRARY_PATH\", \"not set\")[:200]}')
+else:
     print(f'CUDA version:     {torch.version.cuda}')
     print(f'GPU device:       {torch.cuda.get_device_name(0)}')
     print(f'GPU count:        {torch.cuda.device_count()}')
@@ -178,32 +230,23 @@ done
 echo ""
 
 # Check for dataset
-echo "Checking for PPI5K dataset..."
-if [ -d "$SLURM_SUBMIT_DIR/data/ppi5k" ]; then
-    echo "Found: data/ppi5k directory"
+echo "Checking for CN15K dataset..."
+if [ -d "$SLURM_SUBMIT_DIR/data/cn15k" ]; then
+    echo "Found: data/cn15k directory"
     echo "Dataset files:"
-    ls -lh "$SLURM_SUBMIT_DIR/data/ppi5k/"*.tsv "$SLURM_SUBMIT_DIR/data/ppi5k/"*.csv 2>/dev/null | head -5 || echo "Warning: Expected files not found"
+    ls -lh "$SLURM_SUBMIT_DIR/data/cn15k/"*.tsv "$SLURM_SUBMIT_DIR/data/cn15k/"*.csv 2>/dev/null | head -5 || echo "Warning: Expected files not found"
     echo ""
-    echo "Required files (ppi5k format):"
-    echo "  - train.tsv"
-    echo "  - val.tsv"
-    echo "  - test.tsv"
-elif [ -d "$SLURM_SUBMIT_DIR/data/ppi5k" ]; then
-    echo "Found: data/ppi5k directory"
-    echo "Dataset files:"
-    ls -lh "$SLURM_SUBMIT_DIR/data/ppi5k/"*.tsv "$SLURM_SUBMIT_DIR/data/ppi5k/"*.csv 2>/dev/null | head -5 || echo "Warning: Expected files not found"
-    echo ""
-    echo "Required files (ppi5k format):"
+    echo "Required files (cn15k format):"
     echo "  - train.tsv"
     echo "  - val.tsv"
     echo "  - test.tsv"
 else
-    echo "ERROR: data/ppi5k or data/ppi5k directory not found"
-    echo "Please ensure the dataset is in: $SLURM_SUBMIT_DIR/data/ppi5k/"
-    echo "Expected structure (ppi5k format):"
-    echo "  data/ppi5k/train.tsv"
-    echo "  data/ppi5k/val.tsv"
-    echo "  data/ppi5k/test.tsv"
+    echo "ERROR: data/cn15k or data/cn15k directory not found"
+    echo "Please ensure the dataset is in: $SLURM_SUBMIT_DIR/data/cn15k/"
+    echo "Expected structure (cn15k format):"
+    echo "  data/cn15k/train.tsv"
+    echo "  data/cn15k/val.tsv"
+    echo "  data/cn15k/test.tsv"
     exit 1
 fi
 echo ""
@@ -214,7 +257,7 @@ echo "======================================================================"
 echo "Working directory: $(pwd)"
 echo "Script:            main.py"
 echo "GPU:               Enabled (device 0)"
-echo "Test graph size:   All triplets (default for ppi5k, use --test-graph-size to change)"
+echo "Test graph size:   All triplets (default for cn15k, use --test-graph-size to change)"
 echo "Output will be saved to: ${SLURM_JOB_NAME}_${SLURM_JOB_ID}.out"
 echo ""
 echo "Note: If you get OOM errors, reduce --test-graph-size (e.g., 150000)"
@@ -237,11 +280,11 @@ cd "$SLURM_SUBMIT_DIR"
 START_TIME=$(date +%s)
 
 # Run the training script with GPU enabled
-# Default uses all triplets for ppi5k (smaller dataset, should fit in A100 memory)
+# Default uses all triplets for cn15k (smaller dataset, should fit in A100 memory)
 # Adjust --test-graph-size if needed:
 #   - 150000: safer, uses less memory
 #   - 200000: balanced option
-#   - -1: use all triplets (default for ppi5k)
+#   - -1: use all triplets (default for cn15k)
 python main.py --gpu 0 --test-graph-size -1 2>&1 || {
     EXIT_STATUS=$?
     echo ""
