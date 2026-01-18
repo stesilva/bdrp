@@ -1,20 +1,15 @@
 #!/usr/bin/env python3
 import argparse
 import re
+from collections import defaultdict
 from rdflib import Graph, URIRef, Literal
 from rdflib.namespace import RDF, OWL
 
-# -----------------------------
-# Config
-# -----------------------------
-
-# Weight annotations stored on owl:Axiom (edge reification)
 WEIGHT_PROPS_DEFAULT = [
     "http://purl.obolibrary.org/obo/go.owl#hasScoreInteraction",
     "http://purl.obolibrary.org/obo/go.owl#hasExpressionValue",
 ]
 
-# Keep only "signal" relations that are ASSERTED AS EDGES in your OWL file
 KEEP_RELATIONS = {
     "http://purl.obolibrary.org/obo/go.owl#hasGeneExpressionOA",
     "http://purl.obolibrary.org/obo/go.owl#partOfPathway",
@@ -35,35 +30,27 @@ KEEP_RELATIONS = {
     "http://purl.obolibrary.org/obo/go.owl#occursInGO",
 }
 
-# Fix malformed stringification that sometimes appears when parsing RDF/XML tags as strings:
-#   http://.../go.owl#{http://.../go.owl#}hasGeneExpressionOA  ->  http://.../go.owl#hasGeneExpressionOA
 _MALFORMED_IRI_RE = re.compile(r"^(.*)#\{.*\}(.+)$")
 
-
 def normalize_iri(s: str) -> str:
-    """Normalize occasional malformed IRI stringification."""
     m = _MALFORMED_IRI_RE.match(s)
     if m:
         return f"{m.group(1)}#{m.group(2)}"
     return s
 
-
 def to_float(lit: Literal) -> float:
-    try:
-        return float(lit.toPython())
-    except Exception:
-        return float(str(lit))
+    # Handles xsd:decimal, xsd:float, xsd:double, and numeric-ish strings like "-1.9"
+    return float(lit.toPython())
 
-
-def parse_weights_from_axioms(g: Graph, weight_props):
+def parse_weights_from_axioms_all(g: Graph, weight_props):
     """
-    Extract weights stored as OWL2 axiom annotations.
+    Extract ALL numeric weights stored as OWL2 axiom annotations.
 
     Returns:
-        dict mapping (s,p,o) -> float(weight), with s/p/o as normalized strings.
+        dict mapping (s,p,o) -> list[float]
     """
     weight_props = {URIRef(x) for x in weight_props}
-    wmap = {}
+    wmap = defaultdict(list)
 
     for ax in g.subjects(RDF.type, OWL.Axiom):
         s = g.value(ax, OWL.annotatedSource)
@@ -72,27 +59,22 @@ def parse_weights_from_axioms(g: Graph, weight_props):
         if s is None or p is None or o is None:
             continue
 
-        w_lit = None
-        for wp in weight_props:
-            w_lit = g.value(ax, wp)
-            if w_lit is not None:
-                break
-
-        if not isinstance(w_lit, Literal):
-            continue
-
-        try:
-            w = to_float(w_lit)
-        except Exception:
-            continue
-
         ss = normalize_iri(str(s))
         pp = normalize_iri(str(p))
         oo = normalize_iri(str(o))
-        wmap[(ss, pp, oo)] = w
+
+        for wp in weight_props:
+            for lit in g.objects(ax, wp):
+                if not isinstance(lit, Literal):
+                    continue
+                try:
+                    w = to_float(lit)
+                except Exception:
+                    # skips "-", "NA", etc.
+                    continue
+                wmap[(ss, pp, oo)].append(w)
 
     return wmap
-
 
 def convert_owl_to_weighted_edgelist(
     owl_file: str,
@@ -109,8 +91,8 @@ def convert_owl_to_weighted_edgelist(
     if keep_relations is None:
         keep_relations = KEEP_RELATIONS
 
-    # 1) Extract weights for edges via owl:Axiom
-    wmap = parse_weights_from_axioms(g, weight_props)
+    # 1) Extract ALL weights per edge via owl:Axiom
+    wmap = parse_weights_from_axioms_all(g, weight_props)
 
     # 2) ID maps
     ent2id = {}
@@ -126,13 +108,11 @@ def convert_owl_to_weighted_edgelist(
             rel2id[x] = len(rel2id)
         return rel2id[x]
 
-    # 3) Write edges (skip OWL noise by relation whitelist)
     edges_written = 0
     weighted_edges_written = 0
 
     with open(out_tsv, "w", encoding="utf-8") as f:
         for s, p, o in g:
-            # Skip literal objects (we only want entity->entity edges)
             if isinstance(o, Literal):
                 continue
 
@@ -140,18 +120,24 @@ def convert_owl_to_weighted_edgelist(
             pp = normalize_iri(str(p))
             oo = normalize_iri(str(o))
 
-            # Keep only meaningful ontology relations
             if pp not in keep_relations:
                 continue
 
-            w = wmap.get((ss, pp, oo), float(default_weight))
-            if w != 0.0:
-                weighted_edges_written += 1
+            weights = wmap.get((ss, pp, oo), [])
 
-            f.write(f"{ent_id(ss)}\t{rel_id(pp)}\t{ent_id(oo)}\t{w}\n")
-            edges_written += 1
+            # IMPORTANT: one output row per weight
+            if weights:
+                for w in weights:
+                    if w != 0.0:
+                        weighted_edges_written += 1
+                    f.write(f"{ent_id(ss)}\t{rel_id(pp)}\t{ent_id(oo)}\t{w}\n")
+                    edges_written += 1
+            else:
+                # if no weight annotations exist, still emit the edge once
+                f.write(f"{ent_id(ss)}\t{rel_id(pp)}\t{ent_id(oo)}\t{float(default_weight)}\n")
+                edges_written += 1
 
-    # 4) Save mappings
+    # Save mappings
     with open(out_tsv + ".entities.tsv", "w", encoding="utf-8") as f:
         for iri, idx in sorted(ent2id.items(), key=lambda x: x[1]):
             f.write(f"{idx}\t{iri}\n")
@@ -160,16 +146,16 @@ def convert_owl_to_weighted_edgelist(
         for iri, idx in sorted(rel2id.items(), key=lambda x: x[1]):
             f.write(f"{idx}\t{iri}\n")
 
-    # 5) Stats
-    axiom_weights_for_kept_rel = sum(1 for (_, p, _), _w in wmap.items() if p in keep_relations)
+    axiom_weights_for_kept_rel = sum(
+        len(ws) for ((_, p, _), ws) in wmap.items() if p in keep_relations
+    )
 
     print(f"Edges written: {edges_written}")
     print(f"Entities: {len(ent2id)}")
     print(f"Relations: {len(rel2id)}")
     print(f"Weighted edges written (w != 0): {weighted_edges_written}")
-    print(f"Weighted axioms found (all): {len(wmap)}")
-    print(f"Weighted axioms whose predicate is in KEEP_RELATIONS: {axiom_weights_for_kept_rel}")
-
+    print(f"Weighted axiom values found (all numeric values): {sum(len(v) for v in wmap.values())}")
+    print(f"Weighted axiom values whose predicate is in KEEP_RELATIONS: {axiom_weights_for_kept_rel}")
 
 def main():
     ap = argparse.ArgumentParser()
@@ -192,14 +178,14 @@ def main():
         keep_relations=KEEP_RELATIONS,
     )
 
-
 if __name__ == "__main__":
     main()
 
+
 # python owl_to_edges.py --in GSE54514_enriched_ontology_degfilter_v2.11_avgExpression_ovp0.2_ng4.owl --out edges.filtered.tsv --default-weight 0
-# Edges written: 255804
+# Edges written: 265330
 # Entities: 9187
 # Relations: 17
-# Weighted edges written (w != 0): 120796
-# Weighted axioms found (all): 126293
-# Weighted axioms whose predicate is in KEEP_RELATIONS: 126293
+# Weighted edges written (w != 0): 131350
+# Weighted axioms found (all): 136847
+# Weighted axioms whose predicate is in KEEP_RELATIONS: 136847
