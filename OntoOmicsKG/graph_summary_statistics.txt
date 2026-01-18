@@ -1,0 +1,30 @@
+================================================================================
+DETAILED GRAPH STATISTICS SUMMARY
+================================================================================
+
+KEY INSIGHTS:
+--------------------------------------------------------------------------------
+1. Network has 9,187 nodes with ZERO isolated nodes (100% connected)
+2. 255,804 total edges, with 135,008 (52.8%) having zero weight
+3. Only 3 relationship types carry meaningful weights:
+   - hasGeneExpressionOA (gene expression data)
+   - hasPhysicalInteractionWith (protein interactions)
+   - hasGeneticInteractionWith (genetic interactions)
+4. Network dominated by Reactions (5,711, 62.2%)
+5. Patient samples (163) drive 119,173 gene expression measurements
+
+WEIGHT QUARTILE ANALYSIS (Non-Zero Weights):
+--------------------------------------------------------------------------------
+25th percentile: 8.0205
+50th percentile (median): 8.4682
+75th percentile: 9.1900
+95th percentile: 10.9040
+99th percentile: 12.5149
+
+HUB NODES BY TYPE:
+--------------------------------------------------------------------------------
+Protein        : Node   92 with  924 connections - Protein_GRB2
+GO_Term        : Node   84 with 1271 connections - http://purl.obolibrary.org/obo/GO_0110165_instance
+Sample         : Node  354 with  795 connections - Sample_GSM1317983
+Reaction       : Node   38 with   39 connections - Reaction_R-HSA-198746
+Pathway        : Node  115 with 1657 connections - Pathway_R-HSA-162582
