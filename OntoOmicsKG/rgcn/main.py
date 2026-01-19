@@ -2,6 +2,7 @@ import argparse
 import numpy as np
 import torch
 import torch.nn as nn
+import random
 from tqdm import tqdm, trange
 
 from utils import load_data, generate_sampled_graph_and_labels, build_test_graph, calc_mrr
@@ -140,8 +141,20 @@ if __name__ == '__main__':
                         help="Maximum number of training triplets to use for test graph (to avoid OOM). Set to -1 to use all triplets.")
     parser.add_argument("--data-path", type=str, default='..',
                         help="Path to OntoOmicsKG data directory. Default is parent directory (../)")
+    parser.add_argument("--seed", type=int, default=42,
+                        help="Random seed for reproducibility")
 
     args = parser.parse_args()
+    
+    # Set random seed for reproducibility
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(args.seed)
+        torch.cuda.manual_seed_all(args.seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
     
     # Convert -1 to None to use all triplets
     if args.test_graph_size == -1:
