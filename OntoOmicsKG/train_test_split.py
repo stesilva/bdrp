@@ -20,9 +20,9 @@ print(f"\nSplit ratios: Train={TRAIN_RATIO:.0%}, Val={VAL_RATIO:.0%}, Test={TEST
 
 # Load data
 print("\nLoading data...")
-nodes_df = pd.read_csv('edges.filtered.tsv.entities.tsv', sep='\t', header=None, 
+nodes_df = pd.read_csv('edges.new.tsv.entities.tsv', sep='\t', header=None, 
                        names=['id', 'node_uri'])
-edges_df = pd.read_csv('edges.filtered.tsv', sep='\t', header=None)
+edges_df = pd.read_csv('edges.new.tsv', sep='\t', header=None)
 edges_df.columns = ['node1', 'relation_id', 'node2', 'weight'] + \
                    [f'extra_{i}' for i in range(len(edges_df.columns) - 4)]
 
@@ -275,14 +275,14 @@ train_clean = train[['node1', 'relation_id', 'node2', 'weight']].copy()
 val_clean = val[['node1', 'relation_id', 'node2', 'weight']].copy()
 test_clean = test[['node1', 'relation_id', 'node2', 'weight']].copy()
 
-train_clean.to_csv('edges_train.tsv', sep='\t', header=False, index=False)
-val_clean.to_csv('edges_val.tsv', sep='\t', header=False, index=False)
-test_clean.to_csv('edges_test.tsv', sep='\t', header=False, index=False)
+train_clean.to_csv('edges_train_new.tsv', sep='\t', header=False, index=False)
+val_clean.to_csv('edges_val_new.tsv', sep='\t', header=False, index=False)
+test_clean.to_csv('edges_test_new.tsv', sep='\t', header=False, index=False)
 
 print(f"\nSaved files:")
-print(f"  edges_train.tsv: {len(train_clean):,} edges")
-print(f"  edges_val.tsv:   {len(val_clean):,} edges")
-print(f"  edges_test.tsv:  {len(test_clean):,} edges")
+print(f"  edges_train_new.tsv: {len(train_clean):,} edges")
+print(f"  edges_val_new.tsv:   {len(val_clean):,} edges")
+print(f"  edges_test_new.tsv:  {len(test_clean):,} edges")
 
 # ============================================================================
 # Final verification by re-loading files
@@ -291,11 +291,11 @@ print("\n" + "=" * 80)
 print("FINAL VERIFICATION (Re-loading saved files)")
 print("=" * 80)
 
-train_loaded = pd.read_csv('edges_train.tsv', sep='\t', header=None, 
+train_loaded = pd.read_csv('edges_train_new.tsv', sep='\t', header=None, 
                            names=['node1', 'relation_id', 'node2', 'weight'])
-val_loaded = pd.read_csv('edges_val.tsv', sep='\t', header=None,
+val_loaded = pd.read_csv('edges_val_new.tsv', sep='\t', header=None,
                          names=['node1', 'relation_id', 'node2', 'weight'])
-test_loaded = pd.read_csv('edges_test.tsv', sep='\t', header=None,
+test_loaded = pd.read_csv('edges_test_new.tsv', sep='\t', header=None,
                           names=['node1', 'relation_id', 'node2', 'weight'])
 
 train_set_final = set(zip(train_loaded['node1'], train_loaded['relation_id'], train_loaded['node2']))
