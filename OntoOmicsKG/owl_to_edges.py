@@ -181,11 +181,11 @@ def main():
 if __name__ == "__main__":
     main()
 
-
-# python owl_to_edges.py --in GSE54514_enriched_ontology_degfilter_v2.11_avgExpression_ovp0.2_ng4.owl --out edges.filtered.tsv --default-weight 0
 # Edges written: 265330
 # Entities: 9187
 # Relations: 17
 # Weighted edges written (w != 0): 131350
 # Weighted axioms found (all): 136847
 # Weighted axioms whose predicate is in KEEP_RELATIONS: 136847
+
+# python owl_to_edges.py --in GSE54514_enriched_ontology_degfilter_v2.11_avgExpression_ovp0.2_ng4.owl --out edges.new.tsv --default-weight 1
