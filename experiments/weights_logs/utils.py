@@ -319,13 +319,14 @@ def sort_and_rank(score, target):
     return indices
 
 # return MRR (filtered), and Hits @ (1, 3, 10)
-def calc_mrr(embedding, w, test_triplets, all_triplets, hits=[]):
+def calc_mrr(embedding, w, test_triplets, all_triplets, hits=[], relation2id=None):
     with torch.no_grad():
         
         num_entity = len(embedding)
 
         ranks_s = []
         ranks_o = []
+        relations = []  # Track which relation each rank corresponds to
 
         head_relation_triplets = all_triplets[:, :2]
         tail_relation_triplets = torch.stack((all_triplets[:, 2], all_triplets[:, 1])).transpose(0, 1)
@@ -367,7 +368,9 @@ def calc_mrr(embedding, w, test_triplets, all_triplets, hits=[]):
             target = torch.tensor(len(perturb_entity_index) - 1)
             if embedding.is_cuda:
                 target = target.cuda()
-            ranks_s.append(sort_and_rank(score, target))
+            rank_s = sort_and_rank(score, target)
+            ranks_s.append(rank_s)
+            relations.append(relation)
 
             # Perturb subject
             object_ = test_triplet[2]
@@ -404,23 +407,67 @@ def calc_mrr(embedding, w, test_triplets, all_triplets, hits=[]):
             target = torch.tensor(len(perturb_entity_index) - 1)
             if embedding.is_cuda:
                 target = target.cuda()
-            ranks_o.append(sort_and_rank(score, target))
+            rank_o = sort_and_rank(score, target)
+            ranks_o.append(rank_o)
+            relations.append(relation)
 
         ranks_s = torch.cat(ranks_s)
         ranks_o = torch.cat(ranks_o)
+        relations = torch.cat(relations)
 
         ranks = torch.cat([ranks_s, ranks_o])
-        ranks += 1 # change to 1-indexed
+        ranks += 1  # change to 1-indexed
 
+        # Overall metrics
         mrr = torch.mean(1.0 / ranks.float())
-        mr = torch.mean(ranks.float())  # added Mean Rank calculation
+        mr = torch.mean(ranks.float())
 
+        print("\n" + "="*60)
+        print("OVERALL METRICS")
+        print("="*60)
         print("MRR (filtered): {:.6f}".format(mrr.item()))
-        print("MR (filtered): {:.6f}".format(mr.item()))  # added print for Mean Rank
-
+        print("MR (filtered): {:.6f}".format(mr.item()))
 
         for hit in hits:
             avg_count = torch.mean((ranks <= hit).float())
             print("Hits (filtered) @ {}: {:.6f}".format(hit, avg_count.item()))
+
+        # Per-relation metrics
+        print("\n" + "="*60)
+        print("PER-RELATION METRICS")
+        print("="*60)
+        
+        unique_relations = torch.unique(relations)
+        
+        # Create reverse mapping if relation2id provided
+        id2relation = None
+        if relation2id is not None:
+            id2relation = {v: k for k, v in relation2id.items()}
+        
+        for rel in unique_relations:
+            rel_mask = relations == rel
+            rel_ranks = ranks[rel_mask]
+            
+            if len(rel_ranks) == 0:
+                continue
+                
+            rel_mrr = torch.mean(1.0 / rel_ranks.float())
+            rel_mr = torch.mean(rel_ranks.float())
+            
+            # Display relation name if available, otherwise just ID
+            rel_name = f"Relation {rel.item()}"
+            if id2relation is not None and rel.item() in id2relation:
+                rel_name = f"Relation {rel.item()} ({id2relation[rel.item()]})"
+            
+            print(f"\n{rel_name}:")
+            print(f"  Count: {len(rel_ranks)}")
+            print(f"  MRR: {rel_mrr.item():.6f}")
+            print(f"  MR: {rel_mr.item():.6f}")
+            
+            for hit in hits:
+                rel_hit = torch.mean((rel_ranks <= hit).float())
+                print(f"  Hits @ {hit}: {rel_hit.item():.6f}")
+        
+        print("="*60 + "\n")
             
     return mrr.item()

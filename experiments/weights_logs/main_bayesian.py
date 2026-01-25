@@ -34,7 +34,7 @@ def train(train_triplets, train_confidence, model, use_cuda, batch_size, split_s
     return loss
 
 
-def valid(valid_triplets, model, test_graph, all_triplets, use_cuda, step=None):
+def valid(valid_triplets, model, test_graph, all_triplets, use_cuda, step=None, relation2id=None):
     if use_cuda:
         torch.cuda.empty_cache()
         device = torch.device('cuda')
@@ -51,7 +51,7 @@ def valid(valid_triplets, model, test_graph, all_triplets, use_cuda, step=None):
     entity_embedding = model(test_graph.entity, test_graph.edge_index, test_graph.edge_type, 
                             edge_weight=edge_weight)
     mrr = calc_mrr(entity_embedding, model.relation_embedding, valid_triplets, all_triplets, 
-                   hits=[1, 3, 10])
+                   hits=[1, 3, 10], relation2id=relation2id)
     
     if use_cuda:
         torch.cuda.empty_cache()
@@ -59,7 +59,7 @@ def valid(valid_triplets, model, test_graph, all_triplets, use_cuda, step=None):
     return mrr
 
 
-def test(test_triplets, model, test_graph, all_triplets, use_cuda, step=None):
+def test(test_triplets, model, test_graph, all_triplets, use_cuda, step=None, relation2id=None):
     if use_cuda:
         torch.cuda.empty_cache()
         device = torch.device('cuda')
@@ -76,7 +76,7 @@ def test(test_triplets, model, test_graph, all_triplets, use_cuda, step=None):
     entity_embedding = model(test_graph.entity, test_graph.edge_index, test_graph.edge_type, 
                             edge_weight=edge_weight)
     mrr = calc_mrr(entity_embedding, model.relation_embedding, test_triplets, all_triplets, 
-                   hits=[1, 3, 10])
+                   hits=[1, 3, 10], relation2id=relation2id)
     
     if use_cuda:
         torch.cuda.empty_cache()
@@ -178,7 +178,7 @@ def main(args):
                 edge_weight_logger.enable()
             
             valid_mrr = valid(valid_triplets, model, test_graph, all_triplets, use_cuda, 
-                            step=f"valid_epoch_{epoch}")
+                            step=f"valid_epoch_{epoch}", relation2id=relation2id)
             
             if args.log_edge_weights and args.log_validation:
                 edge_weight_logger.save(f"weights_valid_epoch_{epoch:05d}.json")
@@ -206,7 +206,8 @@ def main(args):
         edge_weight_logger.enable()
         tqdm.write("\n[FINAL TEST] Logging edge weights...")
 
-    test_mrr = test(test_triplets, model, test_graph, all_triplets, use_cuda, step="final_test")
+    test_mrr = test(test_triplets, model, test_graph, all_triplets, use_cuda, 
+                    step="final_test", relation2id=relation2id)
     
     # Save final test logs
     if args.log_edge_weights:
