@@ -319,7 +319,19 @@ def sort_and_rank(score, target):
     return indices
 
 # return MRR (filtered), and Hits @ (1, 3, 10)
-def calc_mrr(embedding, w, test_triplets, all_triplets, hits=[], relation2id=None):
+def calc_mrr(embedding, w, test_triplets, all_triplets, hits=[], num_rels=None, relation2id=None):
+    """
+    Calculate MRR and Hits with overall and per-relation breakdowns.
+    
+    Args:
+        embedding: Entity embeddings
+        w: Relation weights
+        test_triplets: Test triplets to evaluate
+        all_triplets: All known triplets (for filtering)
+        hits: List of hit values to compute (e.g., [1, 3, 10])
+        num_rels: Number of relations (optional, for better reporting)
+        relation2id: Dict mapping relation names to IDs (optional, for better reporting)
+    """
     with torch.no_grad():
         
         num_entity = len(embedding)
@@ -370,7 +382,7 @@ def calc_mrr(embedding, w, test_triplets, all_triplets, hits=[], relation2id=Non
                 target = target.cuda()
             rank_s = sort_and_rank(score, target)
             ranks_s.append(rank_s)
-            relations.append(relation)
+            relations.append(relation.view(-1))  # Ensure it's 1D
 
             # Perturb subject
             object_ = test_triplet[2]
@@ -409,7 +421,7 @@ def calc_mrr(embedding, w, test_triplets, all_triplets, hits=[], relation2id=Non
                 target = target.cuda()
             rank_o = sort_and_rank(score, target)
             ranks_o.append(rank_o)
-            relations.append(relation)
+            relations.append(relation.view(-1))  # Ensure it's 1D
 
         ranks_s = torch.cat(ranks_s)
         ranks_o = torch.cat(ranks_o)
