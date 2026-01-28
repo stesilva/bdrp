@@ -56,9 +56,20 @@ def load_data(file_path):
                 relation2id[relation] = int(rid)
         
         # OntoOmicsKG uses edges_train.tsv, edges_val.tsv, edges_test.tsv with numeric IDs
-        train_triplets = read_triplets_numeric(os.path.join(file_path, 'edges_train.tsv'))
-        valid_triplets = read_triplets_numeric(os.path.join(file_path, 'edges_val.tsv'))
-        test_triplets = read_triplets_numeric(os.path.join(file_path, 'edges_test.tsv'))
+        train_result = read_triplets_numeric(os.path.join(file_path, 'edges_train.tsv'))
+        valid_result = read_triplets_numeric(os.path.join(file_path, 'edges_val.tsv'))
+        test_result = read_triplets_numeric(os.path.join(file_path, 'edges_test.tsv'))
+        
+        # Handle both formats: (triplets,) or (triplets, confidences)
+        if isinstance(train_result, tuple):
+            train_triplets, train_conf = train_result
+            valid_triplets, valid_conf = valid_result
+            test_triplets, test_conf = test_result
+        else:
+            train_triplets = train_result
+            valid_triplets = valid_result
+            test_triplets = test_result
+            train_conf = valid_conf = test_conf = None
     else:
         raise FileNotFoundError("Could not find OntoOmicsKG data files. Expected:\n"
                               "  - edges.filtered.tsv.entities.tsv\n"
@@ -72,6 +83,9 @@ def load_data(file_path):
     print('num_train_triples: {}'.format(len(train_triplets)))
     print('num_valid_triples: {}'.format(len(valid_triplets)))
     print('num_test_triples: {}'.format(len(test_triplets)))
+    
+    if train_conf is not None:
+        print('Loaded confidence scores for triplets')
 
     return entity2id, relation2id, train_triplets, valid_triplets, test_triplets
 
@@ -198,13 +212,15 @@ def sort_and_rank(score, target):
     return indices
 
 # return MRR (filtered), and Hits @ (1, 3, 10)
-def calc_mrr(embedding, w, test_triplets, all_triplets, hits=[]):
+def calc_mrr(embedding, w, test_triplets, all_triplets, hits=[], relation2id=None, per_relation=False):
     with torch.no_grad():
         
         num_entity = len(embedding)
 
         ranks_s = []
         ranks_o = []
+        relations_s = []  # Track relations for subject perturbation
+        relations_o = []  # Track relations for object perturbation
 
         head_relation_triplets = all_triplets[:, :2]
         tail_relation_triplets = torch.stack((all_triplets[:, 2], all_triplets[:, 1])).transpose(0, 1)
@@ -246,7 +262,10 @@ def calc_mrr(embedding, w, test_triplets, all_triplets, hits=[]):
             target = torch.tensor(len(perturb_entity_index) - 1)
             if embedding.is_cuda:
                 target = target.cuda()
-            ranks_s.append(sort_and_rank(score, target))
+            rank_s = sort_and_rank(score, target)
+            ranks_s.append(rank_s)
+            if per_relation:
+                relations_s.append(relation.item())
 
             # Perturb subject
             object_ = test_triplet[2]
@@ -283,7 +302,10 @@ def calc_mrr(embedding, w, test_triplets, all_triplets, hits=[]):
             target = torch.tensor(len(perturb_entity_index) - 1)
             if embedding.is_cuda:
                 target = target.cuda()
-            ranks_o.append(sort_and_rank(score, target))
+            rank_o = sort_and_rank(score, target)
+            ranks_o.append(rank_o)
+            if per_relation:
+                relations_o.append(relation.item())
 
         ranks_s = torch.cat(ranks_s)
         ranks_o = torch.cat(ranks_o)
@@ -293,12 +315,70 @@ def calc_mrr(embedding, w, test_triplets, all_triplets, hits=[]):
 
         mrr = torch.mean(1.0 / ranks.float())
         mr = torch.mean(ranks.float())
+        
+        print("OVERALL METRICS")
+        print("="*60)
         print("MRR (filtered): {:.6f}".format(mrr.item()))
         print("MR (filtered): {:.6f}".format(mr.item()))
 
         for hit in hits:
             avg_count = torch.mean((ranks <= hit).float())
             print("Hits (filtered) @ {}: {:.6f}".format(hit, avg_count.item()))
+        
+        # Per-relation breakdown
+        if per_relation and relation2id is not None:
+            print("")
+            print("="*60)
+            print("PER-RELATION METRICS")
+            print("="*60)
+            
+            # Combine relations for both perturbations
+            all_relations = relations_s + relations_o
+            all_ranks = ranks.cpu().numpy()
+            
+            # Create reverse mapping: id -> name
+            id2relation = {v: k for k, v in relation2id.items()}
+            
+            # Compute metrics per relation
+            per_rel_metrics = {}
+            for rel_id in set(all_relations):
+                rel_mask = np.array(all_relations) == rel_id
+                rel_ranks = all_ranks[rel_mask]
+                
+                if len(rel_ranks) > 0:
+                    rel_mrr = np.mean(1.0 / rel_ranks)
+                    rel_mr = np.mean(rel_ranks)
+                    rel_hits = {}
+                    for hit in hits:
+                        rel_hits[hit] = np.mean(rel_ranks <= hit)
+                    
+                    per_rel_metrics[rel_id] = {
+                        'mrr': rel_mrr,
+                        'mr': rel_mr,
+                        'hits': rel_hits,
+                        'count': len(rel_ranks)
+                    }
+            
+            # Print per-relation results
+            for rel_id in sorted(per_rel_metrics.keys()):
+                rel_name = id2relation.get(rel_id, f"Relation_{rel_id}")
+                # Extract short name (part after last # or /)
+                if '#' in rel_name:
+                    short_name = rel_name.split('#')[-1]
+                elif '/' in rel_name:
+                    short_name = rel_name.split('/')[-1]
+                else:
+                    short_name = rel_name
+                
+                metrics = per_rel_metrics[rel_id]
+                print("")
+                print("Relation {} ({}):".format(rel_id, short_name))
+                print("  Count: {}".format(metrics['count']))
+                print("  MRR: {:.6f}".format(metrics['mrr']))
+                print("  MR: {:.6f}".format(metrics['mr']))
+                for hit in hits:
+                    print("  Hits @ {}: {:.6f}".format(hit, metrics['hits'][hit]))
+            print("="*60)
             
     return mrr.item()
 

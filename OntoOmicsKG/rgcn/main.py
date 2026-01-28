@@ -21,7 +21,7 @@ def train(train_triplets, model, use_cuda, batch_size, split_size, negative_samp
 
     return loss
 
-def valid(valid_triplets, model, test_graph, all_triplets, use_cuda):
+def valid(valid_triplets, model, test_graph, all_triplets, use_cuda, relation2id=None, per_relation=False):
 
     if use_cuda:
         # Clear GPU cache before validation to free up memory
@@ -32,7 +32,8 @@ def valid(valid_triplets, model, test_graph, all_triplets, use_cuda):
         all_triplets = all_triplets.to(device)
 
     entity_embedding = model(test_graph.entity, test_graph.edge_index, test_graph.edge_type, test_graph.edge_norm)
-    mrr = calc_mrr(entity_embedding, model.relation_embedding, valid_triplets, all_triplets, hits=[1, 3, 10])
+    mrr = calc_mrr(entity_embedding, model.relation_embedding, valid_triplets, all_triplets, hits=[1, 3, 10],
+                   relation2id=relation2id, per_relation=per_relation)
     
     if use_cuda:
         # Clear cache after validation
@@ -40,7 +41,7 @@ def valid(valid_triplets, model, test_graph, all_triplets, use_cuda):
 
     return mrr
 
-def test(test_triplets, model, test_graph, all_triplets, use_cuda):
+def test(test_triplets, model, test_graph, all_triplets, use_cuda, relation2id=None, per_relation=True):
 
     if use_cuda:
         # Clear GPU cache before testing
@@ -51,7 +52,8 @@ def test(test_triplets, model, test_graph, all_triplets, use_cuda):
         all_triplets = all_triplets.to(device)
 
     entity_embedding = model(test_graph.entity, test_graph.edge_index, test_graph.edge_type, test_graph.edge_norm)
-    mrr = calc_mrr(entity_embedding, model.relation_embedding, test_triplets, all_triplets, hits=[1, 3, 10])
+    mrr = calc_mrr(entity_embedding, model.relation_embedding, test_triplets, all_triplets, hits=[1, 3, 10],
+                   relation2id=relation2id, per_relation=per_relation)
     
     if use_cuda:
         torch.cuda.empty_cache()
@@ -103,7 +105,8 @@ def main(args):
                 torch.cuda.empty_cache()
 
             model.eval()
-            valid_mrr = valid(valid_triplets, model, test_graph, all_triplets, use_cuda)
+            valid_mrr = valid(valid_triplets, model, test_graph, all_triplets, use_cuda,
+                             relation2id=relation2id, per_relation=False)
             
             if valid_mrr > best_mrr:
                 best_mrr = valid_mrr
@@ -118,7 +121,9 @@ def main(args):
     if use_cuda:
         model.cuda()
 
-    test(test_triplets, model, test_graph, all_triplets, use_cuda)
+    # Test with per-relation breakdown enabled
+    test(test_triplets, model, test_graph, all_triplets, use_cuda,
+         relation2id=relation2id, per_relation=True)
 
 if __name__ == '__main__':
 
