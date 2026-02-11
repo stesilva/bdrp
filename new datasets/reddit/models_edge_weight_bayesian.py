@@ -7,35 +7,39 @@ from torch_geometric.utils import scatter
 from utils import uniform
 
 class RGCN(torch.nn.Module):
-    def __init__(self, num_entities, num_relations, num_bases, dropout, edge_weight_mode="normalize"):
+    def __init__(self, num_entities, num_relations, num_bases, dropout, edge_weight_mode="normalize", edge_attr_dim=None):
         super(RGCN, self).__init__()
 
         self.entity_embedding = nn.Embedding(num_entities, 100)
         self.relation_embedding = nn.Parameter(torch.Tensor(num_relations, 100))
+        self.edge_attr_dim = edge_attr_dim  # Store for multi-attribute mode
 
         nn.init.xavier_uniform_(self.relation_embedding, gain=nn.init.calculate_gain('relu'))
 
-        # Pass edge_weight_mode to convolutional layers
+        # Pass edge_weight_mode and edge_attr_dim to convolutional layers
         self.conv1 = RGCNConv(
-            100, 100, num_relations * 2, num_bases=num_bases, edge_weight_mode=edge_weight_mode)
+            100, 100, num_relations * 2, num_bases=num_bases, 
+            edge_weight_mode=edge_weight_mode, edge_attr_dim=edge_attr_dim)
         self.conv2 = RGCNConv(
-            100, 100, num_relations * 2, num_bases=num_bases, edge_weight_mode=edge_weight_mode)
+            100, 100, num_relations * 2, num_bases=num_bases, 
+            edge_weight_mode=edge_weight_mode, edge_attr_dim=edge_attr_dim)
 
         self.dropout_ratio = dropout
 
-    def forward(self, entity, edge_index, edge_type, edge_norm=None, edge_weight=None):
+    def forward(self, entity, edge_index, edge_type, edge_norm=None, edge_weight=None, edge_attr=None):
         """
         Args:
             entity: Entity indices
             edge_index: Graph connectivity
             edge_type: Relation type for each edge
             edge_norm: Legacy parameter (deprecated, use edge_weight instead)
-            edge_weight: Scalar edge attributes for weighted aggregation
+            edge_weight: Scalar edge attributes for weighted aggregation (backward compatibility)
+            edge_attr: Multi-dimensional edge attributes [num_edges, k] for multi-attribute Bayesian mode
         """
         x = self.entity_embedding(entity)
-        x = F.relu(self.conv1(x, edge_index, edge_type, edge_weight=edge_weight))
+        x = F.relu(self.conv1(x, edge_index, edge_type, edge_weight=edge_weight, edge_attr=edge_attr))
         x = F.dropout(x, p=self.dropout_ratio, training=self.training)
-        x = self.conv2(x, edge_index, edge_type, edge_weight=edge_weight)
+        x = self.conv2(x, edge_index, edge_type, edge_weight=edge_weight, edge_attr=edge_attr)
         
         return x
 
@@ -57,13 +61,14 @@ class RGCN(torch.nn.Module):
 
 class RGCNConv(MessagePassing):
     def __init__(self, in_channels, out_channels, num_relations, num_bases,
-                 root_weight=True, bias=True, edge_weight_mode="none", **kwargs):
+                 root_weight=True, bias=True, edge_weight_mode="none", edge_attr_dim=None, **kwargs):
         super().__init__(aggr='mean', **kwargs)
         self.in_channels = in_channels
         self.out_channels = out_channels
         self.num_relations = num_relations
         self.num_bases = num_bases
         self.edge_weight_mode = edge_weight_mode
+        self.edge_attr_dim = edge_attr_dim  # Store for multi-attribute Bayesian mode
 
         self.basis = nn.Parameter(torch.Tensor(num_bases, in_channels, out_channels))
         self.att = nn.Parameter(torch.Tensor(num_relations, num_bases))
@@ -93,28 +98,63 @@ class RGCNConv(MessagePassing):
                 nn.Sigmoid()  # Keep weights in (0,1)
             )
         elif self.edge_weight_mode == "bayesian":
-            # Bayesian edge weights: model weight as w ~ N(μ, σ²)
-            # Learn mean and variance from input confidence scores
-            # Mean network: refines input confidence
-            self.edge_weight_mean_mlp = nn.Sequential(
-                nn.Linear(1, 16),  # Input: confidence score
-                nn.ReLU(),
-                nn.Linear(16, 8),
-                nn.ReLU(),
-                nn.Linear(8, 1),
-                nn.Sigmoid()  # Mean in [0, 1]
-            )
-            # Variance network: learns uncertainty from confidence
-            # Lower confidence -> higher variance (more uncertainty)
-            self.edge_weight_var_mlp = nn.Sequential(
-                nn.Linear(1, 16),  # Input: confidence score
-                nn.ReLU(),
-                nn.Linear(16, 8),
-                nn.ReLU(),
-                nn.Linear(8, 1),
-                nn.Sigmoid()  # Variance in [0, 1], will be scaled
-            )
-            # Scale factor for variance (learnable)
+            # Bayesian Multi-Attribute edge weights
+            # Architecture: edge_attr -> Shared Encoder -> z -> (μ head, σ² head)
+            # Supports both scalar confidence (backward compatibility) and multi-attribute edge_attr
+            
+            # Check if edge_attr_dim is provided (for multi-attribute mode)
+            edge_attr_dim = getattr(self, 'edge_attr_dim', None)
+            
+            if edge_attr_dim is not None and edge_attr_dim > 1:
+                # Multi-Attribute Bayesian Mode
+                # Shared Encoder: learns joint representation from multiple attributes
+                self.edge_encoder = nn.Sequential(
+                    nn.Linear(edge_attr_dim, 16),  # k -> 16D
+                    nn.ReLU(),
+                    nn.Linear(16, 16),  # 16D -> 16D hidden representation
+                    nn.ReLU()
+                )
+                # Mean head: estimates expected strength μ ∈ (0, 1)
+                self.edge_weight_mean_head = nn.Sequential(
+                    nn.Linear(16, 8),
+                    nn.ReLU(),
+                    nn.Linear(8, 1),
+                    nn.Sigmoid()  # μ in [0, 1]
+                )
+                # Variance head: estimates uncertainty σ² ≥ 0
+                self.edge_weight_var_head = nn.Sequential(
+                    nn.Linear(16, 8),
+                    nn.ReLU(),
+                    nn.Linear(8, 1),
+                    nn.Softplus()  # σ² ≥ 0 (ensures positive)
+                )
+                self.edge_weight_mean_mlp = None  # Not used in multi-attr mode
+                self.edge_weight_var_mlp = None   # Not used in multi-attr mode
+            else:
+                # Single-attribute Bayesian Mode (backward compatibility)
+                # Mean network: refines input confidence
+                self.edge_weight_mean_mlp = nn.Sequential(
+                    nn.Linear(1, 16),  # Input: confidence score
+                    nn.ReLU(),
+                    nn.Linear(16, 8),
+                    nn.ReLU(),
+                    nn.Linear(8, 1),
+                    nn.Sigmoid()  # Mean in [0, 1]
+                )
+                # Variance network: learns uncertainty from confidence
+                self.edge_weight_var_mlp = nn.Sequential(
+                    nn.Linear(1, 16),  # Input: confidence score
+                    nn.ReLU(),
+                    nn.Linear(16, 8),
+                    nn.ReLU(),
+                    nn.Linear(8, 1),
+                    nn.Sigmoid()  # Variance in [0, 1], will be scaled
+                )
+                self.edge_encoder = None
+                self.edge_weight_mean_head = None
+                self.edge_weight_var_head = None
+            
+            # Scale factor for variance (learnable, for single-attr mode)
             self.var_scale = nn.Parameter(torch.tensor(0.1))  # Initialize small variance
             # Set edge_weight_mlp to None since we use separate mean/var networks
             self.edge_weight_mlp = None
@@ -143,33 +183,51 @@ class RGCNConv(MessagePassing):
         
         # Initialize Bayesian networks (mean and variance)
         if self.edge_weight_mode == "bayesian":
-            # Initialize mean network to pass through confidence (identity-like)
-            nn.init.xavier_uniform_(self.edge_weight_mean_mlp[0].weight)
-            nn.init.zeros_(self.edge_weight_mean_mlp[0].bias)
-            nn.init.xavier_uniform_(self.edge_weight_mean_mlp[2].weight)
-            nn.init.zeros_(self.edge_weight_mean_mlp[2].bias)
-            # Initialize last layer to be close to identity
-            with torch.no_grad():
-                self.edge_weight_mean_mlp[4].weight.fill_(0.1)
-                self.edge_weight_mean_mlp[4].bias.fill_(0.0)
-            
-            # Initialize variance network: higher variance for lower confidence
-            nn.init.xavier_uniform_(self.edge_weight_var_mlp[0].weight)
-            nn.init.zeros_(self.edge_weight_var_mlp[0].bias)
-            nn.init.xavier_uniform_(self.edge_weight_var_mlp[2].weight)
-            nn.init.zeros_(self.edge_weight_var_mlp[2].bias)
-            # Initialize to produce higher variance for lower confidence
-            with torch.no_grad():
-                self.edge_weight_var_mlp[4].weight.fill_(-0.5)  # Negative to invert confidence
-                self.edge_weight_var_mlp[4].bias.fill_(0.5)  # Bias to ensure some variance
+            if self.edge_encoder is not None:
+                # Initialize multi-attribute encoder
+                for layer in self.edge_encoder:
+                    if isinstance(layer, nn.Linear):
+                        nn.init.xavier_uniform_(layer.weight)
+                        nn.init.zeros_(layer.bias)
+                # Initialize mean head
+                for layer in self.edge_weight_mean_head:
+                    if isinstance(layer, nn.Linear):
+                        nn.init.xavier_uniform_(layer.weight)
+                        nn.init.zeros_(layer.bias)
+                # Initialize variance head
+                for layer in self.edge_weight_var_head:
+                    if isinstance(layer, nn.Linear):
+                        nn.init.xavier_uniform_(layer.weight)
+                        nn.init.zeros_(layer.bias)
+            elif self.edge_weight_mean_mlp is not None:
+                # Single-Attribute Bayesian Mode: Initialize mean and variance MLPs
+                # Initialize mean network to pass through confidence (identity-like)
+                nn.init.xavier_uniform_(self.edge_weight_mean_mlp[0].weight)
+                nn.init.zeros_(self.edge_weight_mean_mlp[0].bias)
+                nn.init.xavier_uniform_(self.edge_weight_mean_mlp[2].weight)
+                nn.init.zeros_(self.edge_weight_mean_mlp[2].bias)
+                # Initialize last layer to be close to identity
+                with torch.no_grad():
+                    self.edge_weight_mean_mlp[4].weight.fill_(0.1)
+                    self.edge_weight_mean_mlp[4].bias.fill_(0.0)
+                
+                # Initialize variance network: higher variance for lower confidence
+                nn.init.xavier_uniform_(self.edge_weight_var_mlp[0].weight)
+                nn.init.zeros_(self.edge_weight_var_mlp[0].bias)
+                nn.init.xavier_uniform_(self.edge_weight_var_mlp[2].weight)
+                nn.init.zeros_(self.edge_weight_var_mlp[2].bias)
+                # Initialize to produce higher variance for lower confidence
+                with torch.no_grad():
+                    self.edge_weight_var_mlp[4].weight.fill_(-0.5)  # Negative to invert confidence
+                    self.edge_weight_var_mlp[4].bias.fill_(0.5)  # Bias to ensure some variance
 
-    def forward(self, x, edge_index, edge_type, edge_norm=None, edge_weight=None, size=None):
+    def forward(self, x, edge_index, edge_type, edge_norm=None, edge_weight=None, edge_attr=None, size=None):
         if edge_weight is None and edge_norm is not None:
             edge_weight = edge_norm
             
-        return self.propagate(edge_index, size=size, x=x, edge_type=edge_type, edge_weight=edge_weight)
+        return self.propagate(edge_index, size=size, x=x, edge_type=edge_type, edge_weight=edge_weight, edge_attr=edge_attr)
 
-    def message(self, x_j, edge_index_j, edge_type, edge_weight):
+    def message(self, x_j, edge_index_j, edge_type, edge_weight, edge_attr=None):
         w = torch.matmul(self.att, self.basis.view(self.num_bases, -1))
 
         if x_j is None:
@@ -198,32 +256,39 @@ class RGCNConv(MessagePassing):
                 out = out * transformed_weight.view(-1, 1)
 
             elif self.edge_weight_mode == "bayesian":
-                assert edge_weight is not None, "edge_weight must be provided for 'bayesian' mode"
-                edge_weight = edge_weight.view(-1, 1)  # Shape: [num_edges, 1]
-                
-                # Compute mean and variance of edge weight distribution
-                # μ: refined mean from input confidence
-                weight_mean = self.edge_weight_mean_mlp(edge_weight)  # [num_edges, 1]
-                
-                # σ²: variance (uncertainty) - higher for lower confidence
-                weight_var_raw = self.edge_weight_var_mlp(edge_weight)  # [num_edges, 1]
-                weight_var = weight_var_raw * torch.abs(self.var_scale) + 1e-6  # Ensure positive, scaled
+                # Multi-Attribute Bayesian Mode or Single-Attribute Mode
+                if edge_attr is not None and self.edge_encoder is not None:
+                    # Multi-Attribute Bayesian Mode
+                    # edge_attr shape: [num_edges, k] where k is number of attributes
+                    assert edge_attr.dim() == 2, f"edge_attr must be 2D [num_edges, k], got shape {edge_attr.shape}"
+                    
+                    # Shared Encoder: Learn joint representation z from edge attributes
+                    z = self.edge_encoder(edge_attr)  # [num_edges, 16]
+                    
+                    # Mean head: Estimate expected strength μ ∈ (0, 1)
+                    weight_mean = self.edge_weight_mean_head(z)  # [num_edges, 1]
+                    
+                    # Variance head: Estimate uncertainty σ² ≥ 0
+                    weight_var = self.edge_weight_var_head(z)  # [num_edges, 1]
+                    weight_var = weight_var + 1e-6  # Ensure positive
+                    
+                else:
+                    # Single-Attribute Bayesian Mode (backward compatibility)
+                    assert edge_weight is not None, "edge_weight must be provided for 'bayesian' mode"
+                    edge_weight = edge_weight.view(-1, 1)  # Shape: [num_edges, 1]
+                    
+                    # Compute mean and variance of edge weight distribution
+                    # μ: refined mean from input confidence
+                    weight_mean = self.edge_weight_mean_mlp(edge_weight)  # [num_edges, 1]
+                    
+                    # σ²: variance (uncertainty) - higher for lower confidence
+                    weight_var_raw = self.edge_weight_var_mlp(edge_weight)  # [num_edges, 1]
+                    weight_var = weight_var_raw * torch.abs(self.var_scale) + 1e-6  # Ensure positive, scaled
                 
                 # Bayesian uncertainty-weighted aggregation
-                # During training: can sample or use mean with uncertainty penalty
-                # During inference: use mean / (1 + variance) for uncertainty-weighted aggregation
-                if self.training:
-                    # Option 1: Sample from distribution (stochastic)
-                    # eps = torch.randn_like(weight_mean)
-                    # effective_weight = weight_mean + eps * torch.sqrt(weight_var)
-                    # effective_weight = torch.clamp(effective_weight, 0, 1)
-                    
-                    # Option 2: Use uncertainty-weighted mean (more stable)
-                    # w_effective = μ / (1 + σ²) - downweights uncertain edges
-                    effective_weight = weight_mean / (1.0 + weight_var)
-                else:
-                    # Inference: use uncertainty-weighted mean
-                    effective_weight = weight_mean / (1.0 + weight_var)
+                # Formula: w_eff = μ / (1 + σ²)
+                # High σ² reduces influence of unreliable edges
+                effective_weight = weight_mean / (1.0 + weight_var)
                 
                 # Apply relation-specific transformation
                 w = w.view(self.num_relations, self.in_channels, self.out_channels)

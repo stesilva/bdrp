@@ -12,19 +12,34 @@ def uniform(size, tensor):
     if tensor is not None:
         tensor.data.uniform_(-bound, bound)
 
-def read_triplets_numeric(file_path):
+def read_triplets_numeric(file_path, attr_columns=None):
     """Read triplets where entities/relations are already numeric IDs.
+    
+    Args:
+        file_path: Path to TSV file
+        attr_columns: List of column indices for edge attributes (e.g., [4,5,6] for columns 4,5,6)
+                     If None, tries to load from .npy file or extracts from TSV
     
     Returns:
         triplets: numpy array of shape (n, 3) with columns [head, relation, tail]
         confidence: numpy array of shape (n,) with confidence scores, or None if not present
+        edge_attr: numpy array of shape (n, k) with edge attributes, or None if not present
     """
     triplets = []
     confidences = []
+    edge_attributes = []
     has_confidence = False
+    has_attributes = False
+
+    # Try to load edge attributes from .npy file first (more efficient)
+    attr_file = file_path.replace('.tsv', '_attr.npy')
+    edge_attr_from_file = None
+    if os.path.exists(attr_file):
+        edge_attr_from_file = np.load(attr_file)
+        has_attributes = True
 
     with open(file_path) as f:
-        for line in f:
+        for idx, line in enumerate(f):
             parts = line.strip().split('\t')
             head, relation, tail = int(parts[0]), int(parts[1]), int(parts[2])
             triplets.append((head, relation, tail))
@@ -33,11 +48,38 @@ def read_triplets_numeric(file_path):
             if len(parts) >= 4:
                 has_confidence = True
                 confidences.append(float(parts[3]))
+            
+            # Extract edge attributes from TSV if not loaded from .npy
+            if edge_attr_from_file is None:
+                if attr_columns is not None and len(parts) > max(attr_columns):
+                    attr_values = [float(parts[i]) for i in attr_columns]
+                    edge_attributes.append(attr_values)
+                    has_attributes = True
+                elif len(parts) >= 7:  # Default: columns 4,5,6 are attributes
+                    try:
+                        attr_values = [float(parts[i]) for i in [4, 5, 6]]
+                        edge_attributes.append(attr_values)
+                        has_attributes = True
+                    except:
+                        pass
 
+    triplets = np.array(triplets)
+    result = [triplets]
+    
     if has_confidence:
-        return np.array(triplets), np.array(confidences)
+        result.append(np.array(confidences))
     else:
-        return np.array(triplets), None
+        result.append(None)
+    
+    if has_attributes:
+        if edge_attr_from_file is not None:
+            result.append(edge_attr_from_file)
+        else:
+            result.append(np.array(edge_attributes))
+    else:
+        result.append(None)
+    
+    return tuple(result)
 
 def load_data(file_path):
     '''
@@ -77,9 +119,22 @@ def load_data(file_path):
                 relation2id[relation] = rid
         
         # CN15k uses .tsv files and numeric IDs directly in triplets
-        train_triplets, train_conf = read_triplets_numeric(os.path.join(file_path, 'train.tsv'))
-        valid_triplets, valid_conf = read_triplets_numeric(os.path.join(file_path, 'val.tsv'))
-        test_triplets, test_conf = read_triplets_numeric(os.path.join(file_path, 'test.tsv'))
+        train_result = read_triplets_numeric(os.path.join(file_path, 'train.tsv'))
+        valid_result = read_triplets_numeric(os.path.join(file_path, 'val.tsv'))
+        test_result = read_triplets_numeric(os.path.join(file_path, 'test.tsv'))
+        
+        # Handle both old format (triplets, conf) and new format (triplets, conf, edge_attr)
+        train_triplets = train_result[0]
+        train_conf = train_result[1] if len(train_result) > 1 else None
+        train_attr = train_result[2] if len(train_result) > 2 else None
+        
+        valid_triplets = valid_result[0]
+        valid_conf = valid_result[1] if len(valid_result) > 1 else None
+        valid_attr = valid_result[2] if len(valid_result) > 2 else None
+        
+        test_triplets = test_result[0]
+        test_conf = test_result[1] if len(test_result) > 1 else None
+        test_attr = test_result[2] if len(test_result) > 2 else None
         
     elif os.path.exists(entity_dict) and os.path.exists(relation_dict):
         # FB15k-237 format: dict files
@@ -107,11 +162,13 @@ def load_data(file_path):
     print('num_valid_triples: {}'.format(len(valid_triplets)))
     print('num_test_triples: {}'.format(len(test_triplets)))
     
-    # Store confidence scores as attributes (for potential future use)
+    # Store confidence scores and edge attributes
     if train_conf is not None:
         print('Loaded confidence scores for triplets')
+    if train_attr is not None:
+        print(f'Loaded edge attributes: shape {train_attr.shape}, k={train_attr.shape[1]} attributes')
 
-    return entity2id, relation2id, (train_triplets, train_conf), (valid_triplets, valid_conf), (test_triplets, test_conf)
+    return entity2id, relation2id, (train_triplets, train_conf, train_attr), (valid_triplets, valid_conf, valid_attr), (test_triplets, test_conf, test_attr)
 
 def read_triplets(file_path, entity2id, relation2id):
     """Read triplets where entities/relations are strings that need mapping.
@@ -176,7 +233,7 @@ def edge_normalization(edge_type, edge_index, num_entity, num_relation):
 
     return edge_norm
 
-def generate_sampled_graph_and_labels(triplets, sample_size, split_size, num_entity, num_rels, negative_rate, confidence_scores=None):
+def generate_sampled_graph_and_labels(triplets, sample_size, split_size, num_entity, num_rels, negative_rate, confidence_scores=None, edge_attr=None):
     """
         Get training graph and signals
         First perform edge neighborhood sampling on graph, then perform negative
@@ -190,6 +247,7 @@ def generate_sampled_graph_and_labels(triplets, sample_size, split_size, num_ent
             num_rels: Number of relation types
             negative_rate: Number of negative samples per positive
             confidence_scores: Optional confidence scores for each triplet (1D numpy array of length N)
+            edge_attr: Optional edge attributes (numpy array of shape [N, k] where k is number of attributes)
     """
 
     edges = sample_edge_uniform(len(triplets), sample_size)
@@ -202,6 +260,11 @@ def generate_sampled_graph_and_labels(triplets, sample_size, split_size, num_ent
     sampled_confidence = None
     if confidence_scores is not None:
         sampled_confidence = confidence_scores[edges]  # Shape: [sample_size] - 1D array
+    
+    # Sample corresponding edge attributes if available
+    sampled_edge_attr = None
+    if edge_attr is not None:
+        sampled_edge_attr = edge_attr[edges]  # Shape: [sample_size, k]
     
     uniq_entity, edges_relabeled = np.unique((src, dst), return_inverse=True)
     src, dst = np.reshape(edges_relabeled, (2, -1))
@@ -225,6 +288,11 @@ def generate_sampled_graph_and_labels(triplets, sample_size, split_size, num_ent
         graph_confidence = torch.tensor(sampled_confidence[graph_split_ids], dtype=torch.float).contiguous()
     else:
         graph_confidence = None
+    
+    # Get edge attributes for graph edges
+    graph_edge_attr = None
+    if sampled_edge_attr is not None:
+        graph_edge_attr = torch.tensor(sampled_edge_attr[graph_split_ids], dtype=torch.float).contiguous()
 
     # Create bi-directional graph
     src, dst = torch.cat((src, dst)), torch.cat((dst, src))
@@ -236,6 +304,10 @@ def generate_sampled_graph_and_labels(triplets, sample_size, split_size, num_ent
     else:
         # Create uniform weights if no confidence provided
         graph_confidence = torch.ones(src.size(0), dtype=torch.float)
+    
+    # Duplicate edge attributes for bidirectional edges
+    if graph_edge_attr is not None:
+        graph_edge_attr = torch.cat((graph_edge_attr, graph_edge_attr), dim=0)
 
     edge_index = torch.stack((src, dst))
     edge_type = rel
@@ -246,6 +318,10 @@ def generate_sampled_graph_and_labels(triplets, sample_size, split_size, num_ent
     
     # Always set edge_weight (use confidence if available, otherwise uniform)
     data.edge_weight = graph_confidence
+    
+    # Set edge attributes if available
+    if graph_edge_attr is not None:
+        data.edge_attr = graph_edge_attr
         
     # Keep edge_norm for backward compatibility
     data.edge_norm = edge_normalization(edge_type, edge_index, len(uniq_entity), num_rels)
@@ -255,7 +331,7 @@ def generate_sampled_graph_and_labels(triplets, sample_size, split_size, num_ent
 
     return data
 
-def build_test_graph(num_nodes, num_rels, triplets, confidence_scores=None, max_edges=None):
+def build_test_graph(num_nodes, num_rels, triplets, confidence_scores=None, edge_attr=None, max_edges=None):
     """
     Build test graph from triplets.
     
@@ -264,6 +340,7 @@ def build_test_graph(num_nodes, num_rels, triplets, confidence_scores=None, max_
         num_rels: Number of relations
         triplets: Training triplets (numpy array)
         confidence_scores: Optional confidence scores for each triplet (numpy array)
+        edge_attr: Optional edge attributes (numpy array of shape [N, k])
         max_edges: Maximum number of edges to use (for memory efficiency). 
                    If None, uses all triplets. If specified, randomly samples max_edges.
     """
@@ -273,6 +350,8 @@ def build_test_graph(num_nodes, num_rels, triplets, confidence_scores=None, max_
         triplets = triplets[indices]
         if confidence_scores is not None:
             confidence_scores = confidence_scores[indices]
+        if edge_attr is not None:
+            edge_attr = edge_attr[indices]
     
     src, rel, dst = triplets.transpose()
 
@@ -283,19 +362,27 @@ def build_test_graph(num_nodes, num_rels, triplets, confidence_scores=None, max_
     # Handle confidence scores
     if confidence_scores is not None:
         graph_confidence = torch.from_numpy(confidence_scores).float()
-        # Duplicate for bidirectional edges
-        graph_confidence = torch.cat((graph_confidence, graph_confidence))
     else:
-        # Create uniform weights if no confidence provided
-        # Will be created after we know the edge count
         graph_confidence = None
+    
+    # Handle edge attributes
+    graph_edge_attr = None
+    if edge_attr is not None:
+        graph_edge_attr = torch.from_numpy(edge_attr).float()
 
     src, dst = torch.cat((src, dst)), torch.cat((dst, src))
     rel = torch.cat((rel, rel + num_rels))
     
-    # Create uniform weights if no confidence provided
-    if graph_confidence is None:
+    # Duplicate confidence scores for bidirectional edges
+    if graph_confidence is not None:
+        graph_confidence = torch.cat((graph_confidence, graph_confidence))
+    else:
+        # Create uniform weights if no confidence provided
         graph_confidence = torch.ones(src.size(0), dtype=torch.float)
+    
+    # Duplicate edge attributes for bidirectional edges
+    if graph_edge_attr is not None:
+        graph_edge_attr = torch.cat((graph_edge_attr, graph_edge_attr), dim=0)
 
     edge_index = torch.stack((src, dst))
     edge_type = rel
@@ -306,6 +393,10 @@ def build_test_graph(num_nodes, num_rels, triplets, confidence_scores=None, max_
     
     # Always set edge_weight
     data.edge_weight = graph_confidence
+    
+    # Set edge attributes if available
+    if graph_edge_attr is not None:
+        data.edge_attr = graph_edge_attr
     
     # Keep edge_norm for backward compatibility
     data.edge_norm = edge_normalization(edge_type, edge_index, num_nodes, num_rels)

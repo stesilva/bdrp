@@ -9,16 +9,17 @@ from utils import load_data, generate_sampled_graph_and_labels, build_test_graph
 from models_edge_weight_bayesian import RGCN
 
 
-def train(train_triplets, train_confidence, model, use_cuda, batch_size, split_size, negative_sample, reg_ratio, num_entities, num_relations):
-    train_data = generate_sampled_graph_and_labels(train_triplets, batch_size, split_size, num_entities, num_relations, negative_sample, train_confidence)
+def train(train_triplets, train_confidence, train_attr, model, use_cuda, batch_size, split_size, negative_sample, reg_ratio, num_entities, num_relations):
+    train_data = generate_sampled_graph_and_labels(train_triplets, batch_size, split_size, num_entities, num_relations, negative_sample, train_confidence, train_attr)
 
     if use_cuda:
         device = torch.device('cuda')
         train_data.to(device)
     
     edge_weight = train_data.edge_weight if hasattr(train_data, 'edge_weight') else getattr(train_data, 'edge_norm', None)
+    edge_attr = train_data.edge_attr if hasattr(train_data, 'edge_attr') else None
     
-    entity_embedding = model(train_data.entity, train_data.edge_index, train_data.edge_type, edge_weight=edge_weight)
+    entity_embedding = model(train_data.entity, train_data.edge_index, train_data.edge_type, edge_weight=edge_weight, edge_attr=edge_attr)
     loss = model.score_loss(entity_embedding, train_data.samples, train_data.labels) + reg_ratio * model.reg_loss(entity_embedding)
 
     return loss
@@ -33,8 +34,9 @@ def valid(valid_triplets, model, test_graph, all_triplets, use_cuda):
         all_triplets = all_triplets.to(device)
 
     edge_weight = test_graph.edge_weight if hasattr(test_graph, 'edge_weight') else getattr(test_graph, 'edge_norm', None)
+    edge_attr = test_graph.edge_attr if hasattr(test_graph, 'edge_attr') else None
     
-    entity_embedding = model(test_graph.entity, test_graph.edge_index, test_graph.edge_type, edge_weight=edge_weight)
+    entity_embedding = model(test_graph.entity, test_graph.edge_index, test_graph.edge_type, edge_weight=edge_weight, edge_attr=edge_attr)
     mrr = calc_mrr(entity_embedding, model.relation_embedding, valid_triplets, all_triplets, hits=[1, 3, 10])
     
     if use_cuda:
@@ -52,8 +54,9 @@ def test(test_triplets, model, test_graph, all_triplets, use_cuda):
         all_triplets = all_triplets.to(device)
 
     edge_weight = test_graph.edge_weight if hasattr(test_graph, 'edge_weight') else getattr(test_graph, 'edge_norm', None)
+    edge_attr = test_graph.edge_attr if hasattr(test_graph, 'edge_attr') else None
     
-    entity_embedding = model(test_graph.entity, test_graph.edge_index, test_graph.edge_type, edge_weight=edge_weight)
+    entity_embedding = model(test_graph.entity, test_graph.edge_index, test_graph.edge_type, edge_weight=edge_weight, edge_attr=edge_attr)
     mrr = calc_mrr(entity_embedding, model.relation_embedding, test_triplets, all_triplets, hits=[1, 3, 10])
     
     if use_cuda:
@@ -73,23 +76,52 @@ def main(args):
     import os
     default_path = os.path.abspath('reddit_converted')
     dataset_path = getattr(args, 'dataset', default_path)
-    entity2id, relation2id, (train_triplets, train_conf), (valid_triplets, valid_conf), (test_triplets, test_conf) = load_data(dataset_path)
+    # Load data (now returns edge_attr as well)
+    data_result = load_data(dataset_path)
+    entity2id, relation2id = data_result[0], data_result[1]
     
-    # Debug confidence scores info
+    # Handle both old format (triplets, conf) and new format (triplets, conf, edge_attr)
+    train_data = data_result[2]
+    valid_data = data_result[3]
+    test_data = data_result[4]
+    
+    train_triplets = train_data[0]
+    train_conf = train_data[1] if len(train_data) > 1 else None
+    train_attr = train_data[2] if len(train_data) > 2 else None
+    
+    valid_triplets = valid_data[0]
+    valid_conf = valid_data[1] if len(valid_data) > 1 else None
+    valid_attr = valid_data[2] if len(valid_data) > 2 else None
+    
+    test_triplets = test_data[0]
+    test_conf = test_data[1] if len(test_data) > 1 else None
+    test_attr = test_data[2] if len(test_data) > 2 else None
+    
+    # Debug confidence scores and edge attributes
     print(f"train_conf is None: {train_conf is None}")
     if train_conf is not None:
         print(f"Confidence stats: min={train_conf.min()}, max={train_conf.max()}, mean={train_conf.mean()}")
     else:
         print("No confidence scores found in dataset - using uniform weights")
     
+    # Determine edge_attr_dim for multi-attribute Bayesian mode
+    edge_attr_dim = None
+    if train_attr is not None:
+        edge_attr_dim = train_attr.shape[1]
+        print(f"Edge attributes found: shape {train_attr.shape}, k={edge_attr_dim} attributes")
+        print(f"Edge attributes: [year_normalized, compound_sentiment, readability]")
+    else:
+        print("No edge attributes found - using scalar confidence mode")
+    
     all_triplets = torch.LongTensor(np.concatenate((train_triplets, valid_triplets, test_triplets)))
 
-    test_graph = build_test_graph(len(entity2id), len(relation2id), train_triplets, train_conf, max_edges=args.test_graph_size)
+    test_graph = build_test_graph(len(entity2id), len(relation2id), train_triplets, train_conf, train_attr, max_edges=args.test_graph_size)
     valid_triplets = torch.LongTensor(valid_triplets)
     test_triplets = torch.LongTensor(test_triplets)
     
-    # Pass edge_weight_mode to your RGCN model constructor (ensure your RGCN accepts this argument)
-    model = RGCN(len(entity2id), len(relation2id), num_bases=args.n_bases, dropout=args.dropout, edge_weight_mode=args.edge_weight_mode)
+    # Pass edge_weight_mode and edge_attr_dim to RGCN model constructor
+    model = RGCN(len(entity2id), len(relation2id), num_bases=args.n_bases, dropout=args.dropout, 
+                 edge_weight_mode=args.edge_weight_mode, edge_attr_dim=edge_attr_dim)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
     print(model)
@@ -101,7 +133,7 @@ def main(args):
         model.train()
         optimizer.zero_grad()
 
-        loss = train(train_triplets, train_conf, model, use_cuda, batch_size=args.graph_batch_size, split_size=args.graph_split_size, 
+        loss = train(train_triplets, train_conf, train_attr, model, use_cuda, batch_size=args.graph_batch_size, split_size=args.graph_split_size, 
             negative_sample=args.negative_sample, reg_ratio = args.regularization, num_entities=len(entity2id), num_relations=len(relation2id))
         
         loss.backward()

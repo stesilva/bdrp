@@ -59,6 +59,7 @@ def load_reddit_data(tsv_file, use_sentiment_as_relation=True, use_properties_fo
     Returns:
         triplets: numpy array of shape (n, 3) with [head, relation, tail]
         confidences: numpy array of shape (n,) with confidence scores
+        edge_attributes: numpy array of shape (n, k) with k edge attributes (year, sentiment, readability)
         entity2id: dict mapping subreddit name to entity ID
         relation2id: dict mapping relation name to relation ID
     """
@@ -94,7 +95,8 @@ def load_reddit_data(tsv_file, use_sentiment_as_relation=True, use_properties_fo
                 'source': source_subreddit,
                 'target': target_subreddit,
                 'post_label': post_label,
-                'properties': properties_vector
+                'properties': properties_vector,
+                'timestamp': timestamp
             })
     
     print(f"Loaded {len(data)} hyperlinks")
@@ -124,6 +126,7 @@ def load_reddit_data(tsv_file, use_sentiment_as_relation=True, use_properties_fo
     # Convert to triplets format
     triplets = []
     confidences = []
+    edge_attributes = []
     
     for item in data:
         source_id = entity2id[item['source']]
@@ -148,25 +151,67 @@ def load_reddit_data(tsv_file, use_sentiment_as_relation=True, use_properties_fo
             confidence = 0.7 if item['post_label'] == 1 else 0.5
         
         confidences.append(confidence)
+        
+        # Extract multi-attribute edge features
+        edge_attr = []
+        
+        # 1. Year (normalized from timestamp)
+        try:
+            # Parse timestamp (assuming format like YYYY-MM-DD or Unix timestamp)
+            if item['timestamp'].isdigit():
+                year = int(item['timestamp'][:4]) if len(item['timestamp']) >= 4 else 2010
+            else:
+                # Try to extract year from date string
+                year = int(item['timestamp'].split('-')[0]) if '-' in item['timestamp'] else 2010
+            # Normalize year to [0, 1] (assuming range 2005-2020)
+            year_normalized = (year - 2005) / 15.0
+            year_normalized = max(0.0, min(1.0, year_normalized))
+        except:
+            year_normalized = 0.5  # Default
+        
+        # 2. Compound sentiment (from POST_PROPERTIES index 21)
+        if len(item['properties']) > 21:
+            compound_sentiment = item['properties'][21]
+            # VADER compound sentiment is in [-1, 1], normalize to [0, 1]
+            compound_norm = (compound_sentiment + 1) / 2.0
+            compound_norm = max(0.0, min(1.0, compound_norm))
+        else:
+            compound_norm = 0.5  # Default
+        
+        # 3. Readability (from POST_PROPERTIES index 17)
+        if len(item['properties']) > 17:
+            readability = item['properties'][17]
+            # Normalize readability (typically 0-100)
+            readability_norm = min(max(readability / 100.0, 0), 1)
+        else:
+            readability_norm = 0.5  # Default
+        
+        edge_attr = [year_normalized, compound_norm, readability_norm]
+        edge_attributes.append(edge_attr)
     
     triplets = np.array(triplets, dtype=np.int32)
     confidences = np.array(confidences, dtype=np.float32)
+    edge_attributes = np.array(edge_attributes, dtype=np.float32)
     
     print(f"Created {len(triplets)} triplets")
     print(f"Confidence stats: min={confidences.min():.3f}, max={confidences.max():.3f}, mean={confidences.mean():.3f}")
+    print(f"Edge attributes shape: {edge_attributes.shape} (k={edge_attributes.shape[1]} attributes)")
     
-    return triplets, confidences, entity2id, relation2id
+    return triplets, confidences, edge_attributes, entity2id, relation2id
 
-def save_data_format(triplets, confidences, entity2id, relation2id, output_dir, train_ratio=0.8, val_ratio=0.1):
+def save_data_format(triplets, confidences, edge_attributes, entity2id, relation2id, output_dir, train_ratio=0.8, val_ratio=0.1):
     """
     Save data in CN15k format (TSV files with numeric IDs).
     
     Format:
     - entity_id.csv: entity_name,entity_id
     - relation_id.csv: relation_name,relation_id
-    - train.tsv: head_id\trelation_id\ttail_id\tconfidence
+    - train.tsv: head_id\trelation_id\ttail_id\tconfidence\tattr1\tattr2\tattr3
     - val.tsv: same format
     - test.tsv: same format
+    - train_attr.npy: numpy array of edge attributes [n, k]
+    - val_attr.npy: same format
+    - test_attr.npy: same format
     """
     os.makedirs(output_dir, exist_ok=True)
     
@@ -195,22 +240,31 @@ def save_data_format(triplets, confidences, entity2id, relation2id, output_dir, 
     
     train_triplets = triplets[train_indices]
     train_conf = confidences[train_indices]
+    train_attr = edge_attributes[train_indices]
     val_triplets = triplets[val_indices]
     val_conf = confidences[val_indices]
+    val_attr = edge_attributes[val_indices]
     test_triplets = triplets[test_indices]
     test_conf = confidences[test_indices]
+    test_attr = edge_attributes[test_indices]
     
     # Save splits
-    for split_name, split_triplets, split_conf in [
-        ('train', train_triplets, train_conf),
-        ('val', val_triplets, val_conf),
-        ('test', test_triplets, test_conf)
+    for split_name, split_triplets, split_conf, split_attr in [
+        ('train', train_triplets, train_conf, train_attr),
+        ('val', val_triplets, val_conf, val_attr),
+        ('test', test_triplets, test_conf, test_attr)
     ]:
         output_file = os.path.join(output_dir, f'{split_name}.tsv')
         with open(output_file, 'w') as f:
-            for triplet, conf in zip(split_triplets, split_conf):
-                f.write(f'{triplet[0]}\t{triplet[1]}\t{triplet[2]}\t{conf:.6f}\n')
-        print(f"Saved {split_name}: {len(split_triplets)} triplets")
+            for triplet, conf, attr in zip(split_triplets, split_conf, split_attr):
+                attr_str = '\t'.join([f'{a:.6f}' for a in attr])
+                f.write(f'{triplet[0]}\t{triplet[1]}\t{triplet[2]}\t{conf:.6f}\t{attr_str}\n')
+        
+        # Save edge attributes as numpy array for efficient loading
+        attr_file = os.path.join(output_dir, f'{split_name}_attr.npy')
+        np.save(attr_file, split_attr)
+        
+        print(f"Saved {split_name}: {len(split_triplets)} triplets, {split_attr.shape[1]} edge attributes")
     
     print(f"\nData saved to {output_dir}")
     print(f"Train: {len(train_triplets)}, Val: {len(val_triplets)}, Test: {len(test_triplets)}")
@@ -235,7 +289,7 @@ def main():
     args = parser.parse_args()
     
     # Load and convert data
-    triplets, confidences, entity2id, relation2id = load_reddit_data(
+    triplets, confidences, edge_attributes, entity2id, relation2id = load_reddit_data(
         args.input,
         use_sentiment_as_relation=args.use_sentiment_relation,
         use_properties_for_confidence=args.use_properties_confidence
@@ -243,7 +297,7 @@ def main():
     
     # Save in expected format
     save_data_format(
-        triplets, confidences, entity2id, relation2id,
+        triplets, confidences, edge_attributes, entity2id, relation2id,
         args.output,
         train_ratio=args.train_ratio,
         val_ratio=args.val_ratio
