@@ -1,0 +1,17 @@
+0	http://purl.obolibrary.org/obo/go.owl#participatedIn
+1	http://purl.obolibrary.org/obo/go.owl#hasGeneExpressionOA
+2	http://purl.obolibrary.org/obo/go.owl#isAssociatedWithGO
+3	http://purl.obolibrary.org/obo/go.owl#hasPhysicalInteractionWith
+4	http://purl.obolibrary.org/obo/go.owl#partOfPathway
+5	http://purl.obolibrary.org/obo/go.owl#isAssociatedWithProteinPathway
+6	http://purl.obolibrary.org/obo/go.owl#hasFunctionalInteractionWith
+7	http://purl.obolibrary.org/obo/go.owl#containedIn
+8	http://purl.obolibrary.org/obo/go.owl#hasModification
+9	http://purl.obolibrary.org/obo/go.owl#hasGeneticInteractionWith
+10	http://purl.obolibrary.org/obo/go.owl#isAGO
+11	http://purl.obolibrary.org/obo/go.owl#positivelyRegulatesGO
+12	http://purl.obolibrary.org/obo/go.owl#regulatesGO
+13	http://purl.obolibrary.org/obo/go.owl#partOfGO
+14	http://purl.obolibrary.org/obo/go.owl#hasPartGO
+15	http://purl.obolibrary.org/obo/go.owl#occursInGO
+16	http://purl.obolibrary.org/obo/go.owl#negativelyRegulatesGO
